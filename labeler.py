@@ -307,7 +307,7 @@ class ImageTextPairApp(QWidget):
         QApplication.processEvents()
 
         try:
-            output_text = self.describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key)
+            output_text = self.fal_describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key)
 
             if caption_mode == "Append":
                 current_text = self.text_edit.toPlainText()
@@ -327,7 +327,7 @@ class ImageTextPairApp(QWidget):
             self.prev_button.setEnabled(True)
             self.next_button.setEnabled(True)
 
-    def describe_image(self, image_path, prompt, max_tokens, temp, top_p, model, api_key):
+    def fal_describe_image(self, image_path, prompt, max_tokens, temp, top_p, model, api_key):
         # Set api key
         os.environ["FAL_KEY"] = api_key
         
@@ -492,7 +492,7 @@ class ImageTextPairApp(QWidget):
 
         models_label = QLabel("Models:")
         self.models_dropdown = QComboBox()
-        self.models_dropdown.addItems(["LLavaV15_13B", "LLavaV16_34B", "Florence_2_Large"])
+        self.models_dropdown.addItems(["Florence_2_Large", "LLavaV15_13B", "LLavaV16_34B"])
         fal_layout.addWidget(models_label)
         fal_layout.addWidget(self.models_dropdown)
         self.models_dropdown.currentTextChanged.connect(self.toggle_model_options)
@@ -678,17 +678,17 @@ class ImageTextPairApp(QWidget):
             self.reset_generation_status()
 
     def previous_image(self):
-        if self.current_image_index > 0:
+        if self.image_files:
             if self.should_autosave():
                 self.save_description()
-            self.current_image_index -= 1
+            self.current_image_index = (self.current_image_index - 1) % len(self.image_files)
             self.load_current_image()
 
     def next_image(self):
-        if self.current_image_index < len(self.image_files) - 1:
+        if self.image_files:
             if self.should_autosave():
                 self.save_description()
-            self.current_image_index += 1
+            self.current_image_index = (self.current_image_index + 1) % len(self.image_files)
             self.load_current_image()
 
     def next_unlabeled_image(self):
