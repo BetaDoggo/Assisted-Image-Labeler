@@ -1,8 +1,11 @@
 import sys
+import io
+from PIL import Image
+import fal_client
 import os
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, 
                              QSplitter, QLineEdit, QStyle, QStyleFactory, QScrollArea, QDialog, QCheckBox, QFormLayout, QMessageBox,
-                             QFrame)
+                             QFrame, QComboBox, QStackedWidget, QSpinBox, QSlider)
 from PyQt5.QtGui import QPixmap, QIcon, QPalette, QColor, QResizeEvent
 from PyQt5.QtCore import Qt, QSize, QSettings
 
@@ -39,12 +42,18 @@ class SettingsDialog(QDialog):
         self.autosave_checkbox.setChecked(self.settings.value("autosave", True, type=bool))
         layout.addRow("Autosave on navigation:", self.autosave_checkbox)
 
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setText(self.settings.value("fal_api_key", ""))
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Fal API Key:", self.api_key_input)
+
         save_button = QPushButton("Save")
         save_button.clicked.connect(self.save_settings)
         layout.addRow(save_button)
 
     def save_settings(self):
         self.settings.setValue("autosave", self.autosave_checkbox.isChecked())
+        self.settings.setValue("fal_api_key", self.api_key_input.text())
         self.accept()
 
 class ImageTextPairApp(QWidget):
@@ -55,6 +64,120 @@ class ImageTextPairApp(QWidget):
         self.current_directory = ""
         self.settings = QSettings("GoodCompany", "Labeler")
         self.initUI()
+    
+    def toggle_model_options(self, model):
+        llava_models = ["LLavaV15_13B", "LLavaV16_34B"]
+        show = model in llava_models
+
+        self.prompt_label.setVisible(show)
+        self.prompt_input.setVisible(show)
+        self.max_tokens_label.setVisible(show)
+        self.max_tokens_input.setVisible(show)
+        self.temp_label.setVisible(show)
+        self.temp_slider.setVisible(show)
+        self.temp_value.setVisible(show)
+        self.top_p_label.setVisible(show)
+        self.top_p_slider.setVisible(show)
+        self.top_p_value.setVisible(show)
+
+    def reset_generation_status(self):
+        if hasattr(self, 'generation_status'):
+            self.generation_status.setText("Status: Ready")
+
+    def on_provider_changed(self, provider):
+            if provider == "Fal":
+                self.stacked_widget.setCurrentIndex(0)
+            else:  # Local
+                self.stacked_widget.setCurrentIndex(1)
+
+    def update_temp_value(self):
+        self.temp_value.setText(f"{self.temp_slider.value() / 10:.1f}")
+
+    def update_top_p_value(self):
+        self.top_p_value.setText(f"{self.top_p_slider.value() / 10:.1f}")
+
+    def generate_caption(self):
+        if not self.image_files:
+            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            return
+    
+        current_image = os.path.join(self.current_directory, self.image_files[self.current_image_index])
+        prompt = self.prompt_input.toPlainText()
+        max_tokens = self.max_tokens_input.value()
+        temp = self.temp_slider.value() / 10
+        top_p = self.top_p_slider.value() / 10
+        model = self.models_dropdown.currentText()
+        api_key = self.settings.value("fal_api_key", "")
+        caption_mode = self.caption_mode_dropdown.currentText()
+        
+        if not api_key:
+            QMessageBox.warning(self, "Missing API Key", "Please set your Fal API key in the Settings.")
+            return
+        
+        self.generation_status.setText("Status: Generating...")
+        self.generate_button.setEnabled(False)
+        self.prev_button.setEnabled(False)
+        self.next_button.setEnabled(False)
+        QApplication.processEvents()
+        
+        try:
+            output_text = self.describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key)
+            
+            if caption_mode == "Append":
+                current_text = self.text_edit.toPlainText()
+                if current_text:
+                    self.text_edit.setText(f"{current_text}\n\n{output_text}")
+                else:
+                    self.text_edit.setText(output_text)
+            else:  # Replace
+                self.text_edit.setText(output_text)
+            
+            self.generation_status.setText("Status: Generation Complete")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+            self.generation_status.setText("Status: Generation Failed")
+        finally:
+            self.generate_button.setEnabled(True)
+            self.prev_button.setEnabled(True)
+            self.next_button.setEnabled(True)
+
+    def describe_image(self, image_path, prompt, max_tokens, temp, top_p, model, api_key):
+        # Set api key
+        os.environ["FAL_KEY"] = api_key
+        
+        models = {
+            "LLavaV15_13B": "fal-ai/llavav15-13b",
+            "LLavaV16_34B": "fal-ai/llava-next",
+            "Florence_2_Large": "fal-ai/florence-2-large/detailed-caption",
+        }
+        endpoint = models.get(model)
+
+        # Upload image
+        with open(image_path, 'rb') as img_file:
+            file = img_file.read()
+        image_url = fal_client.upload(file, "image/png")
+        
+        if endpoint == "fal-ai/florence-2-large/detailed-caption":
+            handler = fal_client.submit(
+            endpoint,
+            arguments={
+                "image_url": image_url,})
+            result = handler.get()
+            output_text = result['results']
+        else:
+            handler = fal_client.submit(
+                endpoint,
+                arguments={
+                    "image_url": image_url,
+                    "prompt": prompt,
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                }
+            )
+            result = handler.get()
+            output_text = result['output']
+        return output_text
 
     def initUI(self):
         self.setWindowTitle('Labeler')
@@ -97,8 +220,9 @@ class ImageTextPairApp(QWidget):
         self.image_counter = QLabel("0/0")
         delete_counter_layout.addWidget(self.delete_button)
         delete_counter_layout.addStretch(1)
-        delete_counter_layout.addWidget(self.labeled_counter)
-        delete_counter_layout.addWidget(self.image_counter)
+        delete_counter_layout.addWidget(self.labeled_counter, alignment=Qt.AlignCenter)
+        delete_counter_layout.addStretch(1)
+        delete_counter_layout.addWidget(self.image_counter, alignment=Qt.AlignRight)
 
         nav_layout.addWidget(self.prev_button)
         nav_layout.addStretch(1)
@@ -131,17 +255,16 @@ class ImageTextPairApp(QWidget):
         save_button.clicked.connect(self.save_description)
         next_unlabeled_button = QPushButton('Next Unlabeled', self)
         next_unlabeled_button.clicked.connect(self.next_unlabeled_image)
-        settings_button = QPushButton('Settings', self)
-        settings_button.clicked.connect(self.open_settings)
         button_layout.addWidget(load_button)
         button_layout.addWidget(save_button)
         button_layout.addWidget(next_unlabeled_button)
-        button_layout.addWidget(settings_button)
 
         left_panel.addLayout(button_layout)
 
         # Jump to image and Show Models layout
         jump_models_layout = QHBoxLayout()
+        settings_button = QPushButton('Settings', self)
+        settings_button.clicked.connect(self.open_settings)
         self.jump_input = QLineEdit(self)
         self.jump_input.setPlaceholderText("Enter image number")
         jump_button = QPushButton('Jump to Image', self)
@@ -149,6 +272,7 @@ class ImageTextPairApp(QWidget):
         self.show_models_button = QPushButton('Show Models', self)
         self.show_models_button.setCheckable(True)
         self.show_models_button.clicked.connect(self.toggle_models_panel)
+        jump_models_layout.addWidget(settings_button)
         jump_models_layout.addWidget(self.jump_input)
         jump_models_layout.addWidget(jump_button)
         jump_models_layout.addWidget(self.show_models_button)
@@ -162,12 +286,97 @@ class ImageTextPairApp(QWidget):
         self.right_panel = QFrame()
         self.right_panel.setFrameShape(QFrame.StyledPanel)
         right_layout = QVBoxLayout(self.right_panel)
-        
-        # Placeholder for AI models
-        ai_placeholder = QTextEdit()
-        ai_placeholder.setPlaceholderText("AI models will be integrated here in the future.")
-        ai_placeholder.setReadOnly(True)
-        right_layout.addWidget(ai_placeholder)
+
+        # Provider dropdown
+        provider_layout = QHBoxLayout()
+        provider_label = QLabel("Provider:")
+        self.provider_dropdown = QComboBox()
+        self.provider_dropdown.addItems(["Fal", "Local(wip)"])
+        self.provider_dropdown.currentTextChanged.connect(self.on_provider_changed)
+        provider_layout.addWidget(provider_label)
+        provider_layout.addWidget(self.provider_dropdown)
+        right_layout.addLayout(provider_layout)
+
+        # Stacked widget for Fal and Local options
+        self.stacked_widget = QStackedWidget()
+
+        # Fal layout
+        fal_widget = QWidget()
+        fal_layout = QVBoxLayout(fal_widget)
+
+        models_label = QLabel("Models:")
+        self.models_dropdown = QComboBox()
+        self.models_dropdown.addItems(["LLavaV15_13B", "LLavaV16_34B", "Florence_2_Large"])
+        fal_layout.addWidget(models_label)
+        fal_layout.addWidget(self.models_dropdown)
+        self.models_dropdown.currentTextChanged.connect(self.toggle_model_options)
+
+        self.prompt_label = QLabel("Prompt:")
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setPlaceholderText("Enter prompt here...")
+        fal_layout.addWidget(self.prompt_label)
+        fal_layout.addWidget(self.prompt_input)
+
+        self.max_tokens_label = QLabel("Max Tokens:")
+        self.max_tokens_input = QSpinBox()
+        self.max_tokens_input.setRange(1, 2048)
+        self.max_tokens_input.setValue(256)
+        fal_layout.addWidget(self.max_tokens_label)
+        fal_layout.addWidget(self.max_tokens_input)
+
+        self.temp_label = QLabel("Temperature:")
+        self.temp_slider = QSlider(Qt.Horizontal)
+        self.temp_slider.setRange(1, 10)
+        self.temp_slider.setValue(2)
+        self.temp_value = QLabel("0.2")
+        temp_layout = QHBoxLayout()
+        temp_layout.addWidget(self.temp_slider)
+        temp_layout.addWidget(self.temp_value)
+        fal_layout.addWidget(self.temp_label)
+        fal_layout.addLayout(temp_layout)
+        self.temp_slider.valueChanged.connect(self.update_temp_value)
+
+        self.top_p_label = QLabel("Top P:")
+        self.top_p_slider = QSlider(Qt.Horizontal)
+        self.top_p_slider.setRange(1, 10)
+        self.top_p_slider.setValue(10)
+        self.top_p_value = QLabel("1.0")
+        top_p_layout = QHBoxLayout()
+        top_p_layout.addWidget(self.top_p_slider)
+        top_p_layout.addWidget(self.top_p_value)
+        fal_layout.addWidget(self.top_p_label)
+        fal_layout.addLayout(top_p_layout)
+        self.top_p_slider.valueChanged.connect(self.update_top_p_value)
+        self.toggle_model_options(self.models_dropdown.currentText())
+
+        self.caption_mode_label = QLabel("Caption Mode:")
+        self.caption_mode_dropdown = QComboBox()
+        self.caption_mode_dropdown.addItems(["Replace", "Append"])
+        caption_mode_layout = QHBoxLayout()
+        caption_mode_layout.addWidget(self.caption_mode_label)
+        caption_mode_layout.addWidget(self.caption_mode_dropdown)
+        fal_layout.addLayout(caption_mode_layout)
+
+        self.generation_status = QLabel("Status: Ready")
+        fal_layout.addWidget(self.generation_status)
+
+        self.generate_button = QPushButton("Generate Caption")
+        self.generate_button.clicked.connect(self.generate_caption)
+        fal_layout.addWidget(self.generate_button)
+
+        self.stacked_widget.addWidget(fal_widget)
+
+        # Local layout
+        Local_widget = QWidget()
+        Local_layout = QVBoxLayout(Local_widget)
+        endpoint_label = QLabel("Endpoint:")
+        self.endpoint_input = QLineEdit()
+        Local_layout.addWidget(endpoint_label)
+        Local_layout.addWidget(self.endpoint_input)
+        self.stacked_widget.addWidget(Local_widget)
+
+        right_layout.addWidget(self.stacked_widget)
+        right_layout.addStretch(1)  # Push everything to the top
 
         self.right_panel.hide()  # Initially hidden
         main_layout.addWidget(self.right_panel, 3)  # Giving less space to the right panel
@@ -208,6 +417,7 @@ class ImageTextPairApp(QWidget):
             self.image_label.setPixmap(pixmap)
             self.load_description()
             self.update_counters()
+            self.reset_generation_status()
 
     def previous_image(self):
         if self.current_image_index > 0:
