@@ -1,2 +1,7 @@
 pyqt5
 fal_client
+onnxruntime
+pandas
+tqdm
+numpy
+huggingface_hub

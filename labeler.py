@@ -1,8 +1,8 @@
-import sys
-import io
-from PIL import Image
-import fal_client
 import os
+import sys
+from PIL import Image
+from wd_tagger.tagger import ImageTagger
+import fal_client
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, 
                              QSplitter, QLineEdit, QStyle, QStyleFactory, QScrollArea, QDialog, QCheckBox, QFormLayout, QMessageBox,
                              QFrame, QComboBox, QStackedWidget, QSpinBox, QSlider)
@@ -96,11 +96,65 @@ class ImageTextPairApp(QWidget):
     def update_top_p_value(self):
         self.top_p_value.setText(f"{self.top_p_slider.value() / 10:.1f}")
 
-    def generate_caption(self):
+    def update_general_threshold_label(self):
+        value = self.general_threshold_slider.value() / 100
+        self.general_threshold_label.setText(f"General Threshold: {value:.2f}")
+
+    def update_character_threshold_label(self):
+        value = self.character_threshold_slider.value() / 100
+        self.character_threshold_label.setText(f"Character Threshold: {value:.2f}")
+
+    def generate_wd_caption(self):
         if not self.image_files:
             QMessageBox.warning(self, "No Image", "Please load an image first.")
             return
-    
+
+        self.local_status_label.setText("Status: Generating...")
+        self.local_generate_button.setEnabled(False)
+        QApplication.processEvents()
+
+        try:
+            current_image = os.path.join(self.current_directory, self.image_files[self.current_image_index])
+            model = self.local_model_dropdown.currentText().lower().replace("-", "")
+
+            general_threshold = self.general_threshold_slider.value() / 100
+            character_threshold = self.character_threshold_slider.value() / 100
+
+            wdtagger = ImageTagger()
+            result = wdtagger.tag_image(
+                current_image,
+                model=model,
+                general=self.include_general.isChecked(),
+                rating=self.include_rating.isChecked(),
+                character=self.include_character.isChecked(),
+                general_threshold=general_threshold,
+                character_threshold=character_threshold,
+                general_mcut=self.general_mcut.isChecked(),
+                character_mcut=self.character_mcut.isChecked()
+            )
+
+            caption_mode = self.local_caption_mode_dropdown.currentText()
+            if caption_mode == "Append":
+                current_text = self.text_edit.toPlainText()
+                if current_text:
+                    self.text_edit.setText(f"{current_text}\n\n{result}")
+                else:
+                    self.text_edit.setText(result)
+            else:  # Replace
+                self.text_edit.setText(result)
+
+            self.local_status_label.setText("Status: Generation Complete")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+            self.local_status_label.setText("Status: Generation Failed")
+        finally:
+            self.local_generate_button.setEnabled(True)
+
+    def generate_fal_caption(self):
+        if not self.image_files:
+            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            return
+
         current_image = os.path.join(self.current_directory, self.image_files[self.current_image_index])
         prompt = self.prompt_input.toPlainText()
         max_tokens = self.max_tokens_input.value()
@@ -109,20 +163,20 @@ class ImageTextPairApp(QWidget):
         model = self.models_dropdown.currentText()
         api_key = self.settings.value("fal_api_key", "")
         caption_mode = self.caption_mode_dropdown.currentText()
-        
+
         if not api_key:
             QMessageBox.warning(self, "Missing API Key", "Please set your Fal API key in the Settings.")
             return
-        
+
         self.generation_status.setText("Status: Generating...")
         self.generate_button.setEnabled(False)
         self.prev_button.setEnabled(False)
         self.next_button.setEnabled(False)
         QApplication.processEvents()
-        
+
         try:
             output_text = self.describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key)
-            
+
             if caption_mode == "Append":
                 current_text = self.text_edit.toPlainText()
                 if current_text:
@@ -131,7 +185,7 @@ class ImageTextPairApp(QWidget):
                     self.text_edit.setText(output_text)
             else:  # Replace
                 self.text_edit.setText(output_text)
-            
+
             self.generation_status.setText("Status: Generation Complete")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
@@ -291,7 +345,7 @@ class ImageTextPairApp(QWidget):
         provider_layout = QHBoxLayout()
         provider_label = QLabel("Provider:")
         self.provider_dropdown = QComboBox()
-        self.provider_dropdown.addItems(["Fal", "Local(wip)"])
+        self.provider_dropdown.addItems(["Fal", "Local"])
         self.provider_dropdown.currentTextChanged.connect(self.on_provider_changed)
         provider_layout.addWidget(provider_label)
         provider_layout.addWidget(self.provider_dropdown)
@@ -361,23 +415,90 @@ class ImageTextPairApp(QWidget):
         fal_layout.addWidget(self.generation_status)
 
         self.generate_button = QPushButton("Generate Caption")
-        self.generate_button.clicked.connect(self.generate_caption)
+        self.generate_button.clicked.connect(self.generate_fal_caption)
         fal_layout.addWidget(self.generate_button)
-
+        fal_layout.addStretch(1)  # Push everything to the top
         self.stacked_widget.addWidget(fal_widget)
 
         # Local layout
         Local_widget = QWidget()
         Local_layout = QVBoxLayout(Local_widget)
-        endpoint_label = QLabel("Endpoint:")
-        self.endpoint_input = QLineEdit()
-        Local_layout.addWidget(endpoint_label)
-        Local_layout.addWidget(self.endpoint_input)
+        Local_layout.setSpacing(5)
+
+        type_layout = QHBoxLayout()
+        type_label = QLabel("Type:")
+        self.type_dropdown = QComboBox()
+        self.type_dropdown.addItem("wd-tagger")
+        type_layout.addWidget(type_label)
+        type_layout.addWidget(self.type_dropdown)
+        Local_layout.addLayout(type_layout)
+
+        model_layout = QHBoxLayout()
+        model_label = QLabel("Model:")
+        self.local_model_dropdown = QComboBox()
+        self.local_model_dropdown.addItems(["vit3", "vit3-Large", "swinv3", "convnextv3"])
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(self.local_model_dropdown)
+        Local_layout.addLayout(model_layout)
+
+        # Add checkboxes
+        self.include_general = QCheckBox("Include general")
+        self.include_character = QCheckBox("Include character")
+        self.include_rating = QCheckBox("Include rating")
+        self.include_general.setChecked(True)
+        self.include_character.setChecked(True)
+        self.include_rating.setChecked(True)
+        Local_layout.addWidget(self.include_general)
+        Local_layout.addWidget(self.include_character)
+        Local_layout.addWidget(self.include_rating)
+
+        # Add sliders for thresholds
+        self.general_threshold_slider = QSlider(Qt.Horizontal)
+        self.general_threshold_slider.setRange(0, 100)
+        self.general_threshold_slider.setValue(35)
+        self.general_threshold_label = QLabel("General Threshold: 0.35")
+        self.general_threshold_slider.valueChanged.connect(self.update_general_threshold_label)
+        Local_layout.addWidget(self.general_threshold_label)
+        Local_layout.addWidget(self.general_threshold_slider)
+
+        self.character_threshold_slider = QSlider(Qt.Horizontal)
+        self.character_threshold_slider.setRange(0, 100)
+        self.character_threshold_slider.setValue(85)
+        self.character_threshold_label = QLabel("Character Threshold: 0.85")
+        self.character_threshold_slider.valueChanged.connect(self.update_character_threshold_label)
+        Local_layout.addWidget(self.character_threshold_label)
+        Local_layout.addWidget(self.character_threshold_slider)
+
+        # Add checkboxes for mcut options
+        self.general_mcut = QCheckBox("General MCUT")
+        self.character_mcut = QCheckBox("Character MCUT")
+        Local_layout.addWidget(self.general_mcut)
+        Local_layout.addWidget(self.character_mcut)
+
+        # Add caption mode dropdown
+        caption_mode_layout = QHBoxLayout()
+        caption_mode_label = QLabel("Caption Mode:")
+        self.local_caption_mode_dropdown = QComboBox()
+        self.local_caption_mode_dropdown.addItems(["Replace", "Append"])
+        caption_mode_layout.addWidget(caption_mode_label)
+        caption_mode_layout.addWidget(self.local_caption_mode_dropdown)
+        Local_layout.addLayout(caption_mode_layout)
+
+        # Add status label
+        self.local_status_label = QLabel("Status: Ready")
+        Local_layout.addWidget(self.local_status_label)
+
+        # Add generate button
+        self.local_generate_button = QPushButton("Generate Caption")
+        self.local_generate_button.clicked.connect(self.generate_wd_caption)
+        Local_layout.addWidget(self.local_generate_button)
+
+        Local_layout.addStretch(1)
         self.stacked_widget.addWidget(Local_widget)
 
         right_layout.addWidget(self.stacked_widget)
         right_layout.addStretch(1)  # Push everything to the top
-
+    
         self.right_panel.hide()  # Initially hidden
         main_layout.addWidget(self.right_panel, 3)  # Giving less space to the right panel
 
