@@ -1,13 +1,12 @@
 import os
 import sys
-from PIL import Image
 from wd_tagger.tagger import ImageTagger
 import fal_client
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, 
                              QSplitter, QLineEdit, QStyle, QStyleFactory, QScrollArea, QDialog, QCheckBox, QFormLayout, QMessageBox,
-                             QFrame, QComboBox, QStackedWidget, QSpinBox, QSlider)
-from PyQt5.QtGui import QPixmap, QIcon, QPalette, QColor, QResizeEvent
-from PyQt5.QtCore import Qt, QSize, QSettings
+                             QFrame, QComboBox, QStackedWidget, QSpinBox, QSlider, QProgressBar)
+from PyQt5.QtGui import QPixmap, QPalette, QColor, QResizeEvent
+from PyQt5.QtCore import Qt, QSettings, QThread, pyqtSignal
 
 class ScalableImageLabel(QLabel):
     def __init__(self):
@@ -56,6 +55,106 @@ class SettingsDialog(QDialog):
         self.settings.setValue("fal_api_key", self.api_key_input.text())
         self.accept()
 
+class BatchProcessingDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Batch Processing")
+        self.setGeometry(100, 100, 500, 200)
+        self.setModal(True)
+        self.layout = QVBoxLayout(self)
+        
+        # Checkbox for skipping captioned images
+        self.skip_captioned = QCheckBox("Skip images with existing captions")
+        self.skip_captioned.stateChanged.connect(self.update_button_text)
+        self.layout.addWidget(self.skip_captioned)
+        
+        # Progress bar and label at the bottom
+        self.progress_label = QLabel("Ready to start")
+        self.progress_bar = QProgressBar(self)
+        
+        # Caption All button
+        self.caption_all_button = QPushButton("Caption All Images")
+        self.caption_all_button.clicked.connect(self.start_batch_processing)
+
+        self.layout.addStretch(1) 
+        self.layout.addWidget(self.progress_label)
+        self.layout.addWidget(self.caption_all_button)
+        self.layout.addWidget(self.progress_bar)
+
+        self.worker = None
+        self.update_button_text()
+
+    def update_button_text(self):
+        total_images = len(self.parent().image_files)
+        if self.skip_captioned.isChecked():
+            uncaptioned_images = sum(1 for img in self.parent().image_files
+                                     if not os.path.exists(os.path.splitext(os.path.join(self.parent().current_directory, img))[0] + '.txt'))
+            self.caption_all_button.setText(f"Caption {uncaptioned_images} Images")
+        else:
+            self.caption_all_button.setText(f"Caption {total_images} Images")
+
+    def start_batch_processing(self):
+        self.caption_all_button.setEnabled(False)
+        self.worker = BatchProcessingWorker(self.parent(), self.skip_captioned.isChecked())
+        self.worker.progress_updated.connect(self.update_progress)
+        self.worker.caption_generated.connect(self.parent().update_caption)
+        self.worker.finished.connect(self.on_finished)
+        self.worker.start()
+
+    def update_progress(self, value, total):
+        self.progress_bar.setValue(value)
+        self.progress_bar.setMaximum(total)
+        self.progress_label.setText(f"Processed {value} out of {total} images")
+
+    def on_finished(self):
+        self.caption_all_button.setEnabled(True)
+        self.progress_label.setText("Batch processing completed")
+
+class BatchProcessingWorker(QThread):
+    progress_updated = pyqtSignal(int, int)
+    caption_generated = pyqtSignal(int, str)
+    finished = pyqtSignal()
+
+    def __init__(self, main_app, skip_captioned):
+        super().__init__()
+        self.main_app = main_app
+        self.skip_captioned = skip_captioned
+
+    def run(self):
+        total_images = len(self.main_app.image_files)
+        processed = 0
+        for i, image_file in enumerate(self.main_app.image_files):
+            current_image = os.path.join(self.main_app.current_directory, image_file)
+            txt_path = os.path.splitext(current_image)[0] + '.txt'
+            
+            if self.skip_captioned and os.path.exists(txt_path):
+                continue
+            
+            result = self.generate_caption(current_image)
+            self.caption_generated.emit(i, result)
+            processed += 1
+            self.progress_updated.emit(processed, total_images)
+        self.finished.emit()
+
+    def generate_caption(self, image_path):
+        model = self.main_app.local_model_dropdown.currentText().lower().replace("-", "")
+        general_threshold = self.main_app.general_threshold_slider.value() / 100
+        character_threshold = self.main_app.character_threshold_slider.value() / 100
+
+        wdtagger = ImageTagger()
+        result = wdtagger.tag_image(
+            image_path,
+            model=model,
+            general=self.main_app.include_general.isChecked(),
+            rating=self.main_app.include_rating.isChecked(),
+            character=self.main_app.include_character.isChecked(),
+            general_threshold=general_threshold,
+            character_threshold=character_threshold,
+            general_mcut=self.main_app.general_mcut.isChecked(),
+            character_mcut=self.main_app.character_mcut.isChecked()
+        )
+        return result
+
 class ImageTextPairApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -83,6 +182,7 @@ class ImageTextPairApp(QWidget):
     def reset_generation_status(self):
         if hasattr(self, 'generation_status'):
             self.generation_status.setText("Status: Ready")
+            self.local_status_label.setText("Status: Ready")
 
     def on_provider_changed(self, provider):
             if provider == "Fal":
@@ -104,13 +204,37 @@ class ImageTextPairApp(QWidget):
         value = self.character_threshold_slider.value() / 100
         self.character_threshold_label.setText(f"Character Threshold: {value:.2f}")
 
-    def generate_wd_caption(self):
+    def open_batch_processing(self):
+        dialog = BatchProcessingDialog(self)
+        dialog.exec_()
+
+    def update_caption(self, index, result):
+        self.current_image_index = index
+        self.load_current_image()
+
+        caption_mode = self.local_caption_mode_dropdown.currentText()
+        if caption_mode == "Append":
+            current_text = self.text_edit.toPlainText()
+            if current_text:
+                new_text = f"{current_text}\n\n{result}"
+            else:
+                new_text = result
+        else:  # Replace
+            new_text = result
+
+        self.text_edit.setText(new_text)
+        self.save_description()
+
+    def generate_wd_caption(self, batch_mode=False):
         if not self.image_files:
             QMessageBox.warning(self, "No Image", "Please load an image first.")
             return
 
-        self.local_status_label.setText("Status: Generating...")
-        self.local_generate_button.setEnabled(False)
+        if not batch_mode:
+            self.local_status_label.setText("Status: Generating...")
+            self.local_generate_button.setEnabled(False)
+            self.prev_button.setEnabled(False)
+            self.next_button.setEnabled(False)
         QApplication.processEvents()
 
         try:
@@ -137,18 +261,26 @@ class ImageTextPairApp(QWidget):
             if caption_mode == "Append":
                 current_text = self.text_edit.toPlainText()
                 if current_text:
-                    self.text_edit.setText(f"{current_text}\n\n{result}")
+                    new_text = f"{current_text}\n\n{result}"
                 else:
-                    self.text_edit.setText(result)
+                    new_text = result
             else:  # Replace
-                self.text_edit.setText(result)
+                new_text = result
 
-            self.local_status_label.setText("Status: Generation Complete")
+            self.text_edit.setText(new_text)
+            self.save_description()
+
+            if not batch_mode:
+                self.local_status_label.setText("Status: Generation Complete")
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
-            self.local_status_label.setText("Status: Generation Failed")
+            if not batch_mode:
+                QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+                self.local_status_label.setText("Status: Generation Failed")
         finally:
-            self.local_generate_button.setEnabled(True)
+            if not batch_mode:
+                self.local_generate_button.setEnabled(True)
+                self.prev_button.setEnabled(True)
+                self.next_button.setEnabled(True)
 
     def generate_fal_caption(self):
         if not self.image_files:
@@ -492,6 +624,11 @@ class ImageTextPairApp(QWidget):
         self.local_generate_button = QPushButton("Generate Caption")
         self.local_generate_button.clicked.connect(self.generate_wd_caption)
         Local_layout.addWidget(self.local_generate_button)
+
+        # Add Batch button
+        self.batch_process_button = QPushButton("Batch Processing")
+        self.batch_process_button.clicked.connect(self.open_batch_processing)
+        Local_layout.addWidget(self.batch_process_button)
 
         Local_layout.addStretch(1)
         self.stacked_widget.addWidget(Local_widget)
