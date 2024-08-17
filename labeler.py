@@ -63,43 +63,64 @@ class BatchProcessingDialog(QDialog):
         self.setModal(True)
         self.layout = QVBoxLayout(self)
         
+        # Provider label
+        self.provider_label = QLabel(f"Provider: {self.parent().provider_dropdown.currentText()}")
+        self.layout.addWidget(self.provider_label)
+        
         # Checkbox for skipping captioned images
         self.skip_captioned = QCheckBox("Skip images with existing captions")
         self.skip_captioned.stateChanged.connect(self.update_button_text)
         self.layout.addWidget(self.skip_captioned)
         
-        # Progress bar and label at the bottom
+        # Progress bar and label
         self.progress_label = QLabel("Ready to start")
         self.progress_bar = QProgressBar(self)
         
-        # Caption All button
-        self.caption_all_button = QPushButton("Caption All Images")
-        self.caption_all_button.clicked.connect(self.start_batch_processing)
+        # Caption All / Cancel button
+        self.action_button = QPushButton("Caption All Images")
+        self.action_button.clicked.connect(self.toggle_processing)
 
         self.layout.addStretch(1) 
         self.layout.addWidget(self.progress_label)
-        self.layout.addWidget(self.caption_all_button)
+        self.layout.addWidget(self.action_button)
         self.layout.addWidget(self.progress_bar)
 
         self.worker = None
+        self.is_processing = False
         self.update_button_text()
 
     def update_button_text(self):
-        total_images = len(self.parent().image_files)
-        if self.skip_captioned.isChecked():
-            uncaptioned_images = sum(1 for img in self.parent().image_files
-                                     if not os.path.exists(os.path.splitext(os.path.join(self.parent().current_directory, img))[0] + '.txt'))
-            self.caption_all_button.setText(f"Caption {uncaptioned_images} Images")
+        if self.is_processing:
+            self.action_button.setText("Cancel")
         else:
-            self.caption_all_button.setText(f"Caption {total_images} Images")
+            total_images = len(self.parent().image_files)
+            if self.skip_captioned.isChecked():
+                uncaptioned_images = sum(1 for img in self.parent().image_files
+                                         if not os.path.exists(os.path.splitext(os.path.join(self.parent().current_directory, img))[0] + '.txt'))
+                self.action_button.setText(f"Caption {uncaptioned_images} Images")
+            else:
+                self.action_button.setText(f"Caption {total_images} Images")
 
-    def start_batch_processing(self):
-        self.caption_all_button.setEnabled(False)
+    def toggle_processing(self):
+        if self.is_processing:
+            self.stop_processing()
+        else:
+            self.start_processing()
+
+    def start_processing(self):
+        self.is_processing = True
+        self.update_button_text()
         self.worker = BatchProcessingWorker(self.parent(), self.skip_captioned.isChecked())
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.caption_generated.connect(self.parent().update_caption)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
+
+    def stop_processing(self):
+        if self.worker:
+            self.worker.requestInterruption()
+            self.worker.wait()
+        self.on_finished()
 
     def update_progress(self, value, total):
         self.progress_bar.setValue(value)
@@ -107,7 +128,8 @@ class BatchProcessingDialog(QDialog):
         self.progress_label.setText(f"Processed {value} out of {total} images")
 
     def on_finished(self):
-        self.caption_all_button.setEnabled(True)
+        self.is_processing = False
+        self.update_button_text()
         self.progress_label.setText("Batch processing completed")
 
 class BatchProcessingWorker(QThread):
@@ -124,19 +146,26 @@ class BatchProcessingWorker(QThread):
         total_images = len(self.main_app.image_files)
         processed = 0
         for i, image_file in enumerate(self.main_app.image_files):
+            if self.isInterruptionRequested():
+                break
+            
             current_image = os.path.join(self.main_app.current_directory, image_file)
             txt_path = os.path.splitext(current_image)[0] + '.txt'
             
             if self.skip_captioned and os.path.exists(txt_path):
                 continue
             
-            result = self.generate_caption(current_image)
+            if self.main_app.provider_dropdown.currentText() == "Local":
+                result = self.generate_local_caption(current_image)
+            else:  # Fal
+                result = self.generate_fal_caption(current_image)
+            
             self.caption_generated.emit(i, result)
             processed += 1
             self.progress_updated.emit(processed, total_images)
         self.finished.emit()
 
-    def generate_caption(self, image_path):
+    def generate_local_caption(self, image_path):
         model = self.main_app.local_model_dropdown.currentText().lower().replace("-", "")
         general_threshold = self.main_app.general_threshold_slider.value() / 100
         character_threshold = self.main_app.character_threshold_slider.value() / 100
@@ -154,6 +183,16 @@ class BatchProcessingWorker(QThread):
             character_mcut=self.main_app.character_mcut.isChecked()
         )
         return result
+
+    def generate_fal_caption(self, image_path):
+        prompt = self.main_app.prompt_input.toPlainText()
+        max_tokens = self.main_app.max_tokens_input.value()
+        temp = self.main_app.temp_slider.value() / 10
+        top_p = self.main_app.top_p_slider.value() / 10
+        model = self.main_app.models_dropdown.currentText()
+        api_key = self.main_app.settings.value("fal_api_key", "")
+
+        return self.main_app.fal_describe_image(image_path, prompt, max_tokens, temp, top_p, model, api_key)
 
 class ImageTextPairApp(QWidget):
     def __init__(self):
@@ -205,6 +244,9 @@ class ImageTextPairApp(QWidget):
         self.character_threshold_label.setText(f"Character Threshold: {value:.2f}")
 
     def open_batch_processing(self):
+        if not self.image_files:
+            QMessageBox.warning(self, "No Images", "Please load a directory with images first.")
+            return
         dialog = BatchProcessingDialog(self)
         dialog.exec_()
 
@@ -216,7 +258,7 @@ class ImageTextPairApp(QWidget):
         if caption_mode == "Append":
             current_text = self.text_edit.toPlainText()
             if current_text:
-                new_text = f"{current_text}\n\n{result}"
+                new_text = f"{current_text}, {result}"
             else:
                 new_text = result
         else:  # Replace
@@ -261,7 +303,7 @@ class ImageTextPairApp(QWidget):
             if caption_mode == "Append":
                 current_text = self.text_edit.toPlainText()
                 if current_text:
-                    new_text = f"{current_text}\n\n{result}"
+                    new_text = f"{current_text}, {result}"
                 else:
                     new_text = result
             else:  # Replace
@@ -549,6 +591,12 @@ class ImageTextPairApp(QWidget):
         self.generate_button = QPushButton("Generate Caption")
         self.generate_button.clicked.connect(self.generate_fal_caption)
         fal_layout.addWidget(self.generate_button)
+
+        # Add Batch button
+        self.fal_batch_process_button = QPushButton("Batch Processing")
+        self.fal_batch_process_button.clicked.connect(self.open_batch_processing)
+        fal_layout.addWidget(self.fal_batch_process_button)
+
         fal_layout.addStretch(1)  # Push everything to the top
         self.stacked_widget.addWidget(fal_widget)
 
