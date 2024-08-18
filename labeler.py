@@ -46,6 +46,11 @@ class SettingsDialog(QDialog):
         self.api_key_input.setEchoMode(QLineEdit.Password)
         layout.addRow("Fal API Key:", self.api_key_input)
 
+        self.theme_dropdown = QComboBox()
+        self.theme_dropdown.addItems(["Dark", "Light", "Lime"])
+        self.theme_dropdown.setCurrentText(self.settings.value("theme", "Dark"))
+        layout.addRow("Theme:", self.theme_dropdown)
+
         save_button = QPushButton("Save")
         save_button.clicked.connect(self.save_settings)
         layout.addRow(save_button)
@@ -53,6 +58,7 @@ class SettingsDialog(QDialog):
     def save_settings(self):
         self.settings.setValue("autosave", self.autosave_checkbox.isChecked())
         self.settings.setValue("fal_api_key", self.api_key_input.text())
+        self.settings.setValue("theme", self.theme_dropdown.currentText())
         self.accept()
 
 class BatchProcessingDialog(QDialog):
@@ -202,10 +208,16 @@ class ImageTextPairApp(QWidget):
         self.current_directory = ""
         self.settings = QSettings("GoodCompany", "Labeler")
         self.initUI()
+        self.apply_theme()
     
+    def closeEvent(self, event):
+        if self.should_autosave():
+            self.save_description()
+        super().closeEvent(event)
+
     def toggle_model_options(self, model):
-        llava_models = ["LLavaV15_13B", "LLavaV16_34B"]
-        show = model in llava_models
+        llava_and_moondream_models = ["LLavaV15_13B", "LLavaV16_34B", "moondream_2", "moondream_2_docci"]
+        show = model in llava_and_moondream_models
 
         self.prompt_label.setVisible(show)
         self.prompt_input.setVisible(show)
@@ -217,6 +229,9 @@ class ImageTextPairApp(QWidget):
         self.top_p_label.setVisible(show)
         self.top_p_slider.setVisible(show)
         self.top_p_value.setVisible(show)
+        self.repetition_penalty_label.setVisible(show)
+        self.repetition_penalty_slider.setVisible(show)
+        self.repetition_penalty_value.setVisible(show)
 
     def reset_generation_status(self):
         if hasattr(self, 'generation_status'):
@@ -228,6 +243,9 @@ class ImageTextPairApp(QWidget):
                 self.stacked_widget.setCurrentIndex(0)
             else:  # Local
                 self.stacked_widget.setCurrentIndex(1)
+
+    def update_repetition_penalty_value(self):
+        self.repetition_penalty_value.setText(f"{self.repetition_penalty_slider.value() / 100:.2f}")
 
     def update_temp_value(self):
         self.temp_value.setText(f"{self.temp_slider.value() / 10:.1f}")
@@ -334,6 +352,7 @@ class ImageTextPairApp(QWidget):
         max_tokens = self.max_tokens_input.value()
         temp = self.temp_slider.value() / 10
         top_p = self.top_p_slider.value() / 10
+        repetition_penalty = self.repetition_penalty_slider.value() / 100
         model = self.models_dropdown.currentText()
         api_key = self.settings.value("fal_api_key", "")
         caption_mode = self.caption_mode_dropdown.currentText()
@@ -349,7 +368,7 @@ class ImageTextPairApp(QWidget):
         QApplication.processEvents()
 
         try:
-            output_text = self.fal_describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key)
+            output_text = self.fal_describe_image(current_image, prompt, max_tokens, temp, top_p, model, api_key, repetition_penalty)
 
             if caption_mode == "Append":
                 current_text = self.text_edit.toPlainText()
@@ -369,30 +388,52 @@ class ImageTextPairApp(QWidget):
             self.prev_button.setEnabled(True)
             self.next_button.setEnabled(True)
 
-    def fal_describe_image(self, image_path, prompt, max_tokens, temp, top_p, model, api_key):
+    def fal_describe_image(self, image_path, prompt, max_tokens, temp, top_p, model, api_key, repetition_penalty=1):
         # Set api key
         os.environ["FAL_KEY"] = api_key
-        
         models = {
             "LLavaV15_13B": "fal-ai/llavav15-13b",
             "LLavaV16_34B": "fal-ai/llava-next",
             "Florence_2_Large": "fal-ai/florence-2-large/detailed-caption",
+            "moondream_2": "fal-ai/moondream/batched",
+            "moondream_2_docci": "fal-ai/moondream/batched" # these models share an endpoint
         }
         endpoint = models.get(model)
-
+        if model == "moondream_2_docci":
+            model_id = "fal-ai/moondream2-docci"
+        else:
+            model_id = "vikhyatk/moondream2"
         # Upload image
         with open(image_path, 'rb') as img_file:
             file = img_file.read()
         image_url = fal_client.upload(file, "image/png")
         
-        if endpoint == "fal-ai/florence-2-large/detailed-caption":
+        if endpoint == "fal-ai/florence-2-large/detailed-caption": 
             handler = fal_client.submit(
             endpoint,
             arguments={
                 "image_url": image_url,})
             result = handler.get()
             output_text = result['results']
-        else:
+        elif endpoint == "fal-ai/moondream/batched":
+            handler = fal_client.submit(
+                endpoint,
+                arguments={
+                    "model_id": model_id,
+                    "inputs": [
+                        {
+                        "prompt": prompt,
+                        "image_url": image_url,
+                        }
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": temp,
+                    "top_p": top_p,
+                    "repetition_penalty": repetition_penalty,
+                })
+            result = handler.get()
+            output_text = result['outputs'][0]
+        else: # llava
             handler = fal_client.submit(
                 endpoint,
                 arguments={
@@ -479,7 +520,7 @@ class ImageTextPairApp(QWidget):
         button_layout = QHBoxLayout()
         load_button = QPushButton('Load Directory', self)
         load_button.clicked.connect(self.load_directory)
-        save_button = QPushButton('Save Description', self)
+        save_button = QPushButton('Manual Save', self)
         save_button.clicked.connect(self.save_description)
         next_unlabeled_button = QPushButton('Next Unlabeled', self)
         next_unlabeled_button.clicked.connect(self.next_unlabeled_image)
@@ -534,7 +575,7 @@ class ImageTextPairApp(QWidget):
 
         models_label = QLabel("Models:")
         self.models_dropdown = QComboBox()
-        self.models_dropdown.addItems(["Florence_2_Large", "LLavaV15_13B", "LLavaV16_34B"])
+        self.models_dropdown.addItems(["Florence_2_Large", "moondream_2", "moondream_2_docci", "LLavaV15_13B", "LLavaV16_34B"])
         fal_layout.addWidget(models_label)
         fal_layout.addWidget(self.models_dropdown)
         self.models_dropdown.currentTextChanged.connect(self.toggle_model_options)
@@ -575,7 +616,18 @@ class ImageTextPairApp(QWidget):
         fal_layout.addWidget(self.top_p_label)
         fal_layout.addLayout(top_p_layout)
         self.top_p_slider.valueChanged.connect(self.update_top_p_value)
-        self.toggle_model_options(self.models_dropdown.currentText())
+        
+        self.repetition_penalty_label = QLabel("Repetition Penalty:")
+        self.repetition_penalty_slider = QSlider(Qt.Horizontal)
+        self.repetition_penalty_slider.setRange(100, 150)
+        self.repetition_penalty_slider.setValue(100)
+        self.repetition_penalty_value = QLabel("1.00")
+        repetition_penalty_layout = QHBoxLayout()
+        repetition_penalty_layout.addWidget(self.repetition_penalty_slider)
+        repetition_penalty_layout.addWidget(self.repetition_penalty_value)
+        fal_layout.addWidget(self.repetition_penalty_label)
+        fal_layout.addLayout(repetition_penalty_layout)
+        self.repetition_penalty_slider.valueChanged.connect(self.update_repetition_penalty_value)
 
         self.caption_mode_label = QLabel("Caption Mode:")
         self.caption_mode_dropdown = QComboBox()
@@ -597,6 +649,8 @@ class ImageTextPairApp(QWidget):
         self.fal_batch_process_button.clicked.connect(self.open_batch_processing)
         fal_layout.addWidget(self.fal_batch_process_button)
 
+        self.toggle_model_options(self.models_dropdown.currentText()) # set visible items (Must be after loading all elements)
+        
         fal_layout.addStretch(1)  # Push everything to the top
         self.stacked_widget.addWidget(fal_widget)
 
@@ -699,7 +753,8 @@ class ImageTextPairApp(QWidget):
 
     def open_settings(self):
         dialog = SettingsDialog(self)
-        dialog.exec_()
+        if dialog.exec_():
+            self.apply_theme()
 
     def should_autosave(self):
         return self.settings.value("autosave", True, type=bool)
@@ -834,27 +889,60 @@ class ImageTextPairApp(QWidget):
         super().resizeEvent(event)
         self.image_label.updatePixmap()
 
-def set_dark_theme(app):
-    app.setStyle(QStyleFactory.create("Fusion"))
-    palette = QPalette()
-    palette.setColor(QPalette.Window, QColor(53, 53, 53))
-    palette.setColor(QPalette.WindowText, Qt.white)
-    palette.setColor(QPalette.Base, QColor(25, 25, 25))
-    palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    palette.setColor(QPalette.ToolTipBase, Qt.white)
-    palette.setColor(QPalette.ToolTipText, Qt.white)
-    palette.setColor(QPalette.Text, Qt.white)
-    palette.setColor(QPalette.Button, QColor(53, 53, 53))
-    palette.setColor(QPalette.ButtonText, Qt.white)
-    palette.setColor(QPalette.BrightText, Qt.red)
-    palette.setColor(QPalette.Link, QColor(42, 130, 218))
-    palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    palette.setColor(QPalette.HighlightedText, Qt.black)
-    app.setPalette(palette)
+    def apply_theme(self):
+        theme = self.settings.value("theme", "Dark")
+        if theme == "Dark":
+            self.set_dark_theme()
+        elif theme == "Light":
+            self.set_light_theme()
+        elif theme == "Lime":
+            self.set_lime_theme()
+
+    def set_dark_theme(self):
+        app = QApplication.instance()
+        app.setStyle(QStyleFactory.create("Fusion"))
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(53, 53, 53))
+        palette.setColor(QPalette.WindowText, Qt.white)
+        palette.setColor(QPalette.Base, QColor(25, 25, 25))
+        palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
+        palette.setColor(QPalette.ToolTipBase, Qt.white)
+        palette.setColor(QPalette.ToolTipText, Qt.white)
+        palette.setColor(QPalette.Text, Qt.white)
+        palette.setColor(QPalette.Button, QColor(53, 53, 53))
+        palette.setColor(QPalette.ButtonText, Qt.white)
+        palette.setColor(QPalette.BrightText, Qt.red)
+        palette.setColor(QPalette.Link, QColor(42, 130, 218))
+        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+        palette.setColor(QPalette.HighlightedText, Qt.black)
+        app.setPalette(palette)
+
+    def set_light_theme(self):
+        app = QApplication.instance()
+        app.setStyle(QStyleFactory.create("Fusion"))
+        app.setPalette(app.style().standardPalette())
+
+    def set_lime_theme(self):
+        app = QApplication.instance()
+        app.setStyle(QStyleFactory.create("Fusion"))
+        palette = QPalette()
+        palette.setColor(QPalette.Window, QColor(255, 192, 203))  # Pink
+        palette.setColor(QPalette.WindowText, Qt.black)
+        palette.setColor(QPalette.Base, QColor(50, 205, 50))  # Lime Green
+        palette.setColor(QPalette.AlternateBase, QColor(200, 255, 200))
+        palette.setColor(QPalette.ToolTipBase, Qt.white)
+        palette.setColor(QPalette.ToolTipText, Qt.black)
+        palette.setColor(QPalette.Text, Qt.black)
+        palette.setColor(QPalette.Button, QColor(50, 205, 50))  # Lime Green
+        palette.setColor(QPalette.ButtonText, Qt.black)
+        palette.setColor(QPalette.BrightText, Qt.red)
+        palette.setColor(QPalette.Link, QColor(42, 130, 218))
+        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
+        palette.setColor(QPalette.HighlightedText, Qt.white)
+        app.setPalette(palette)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    set_dark_theme(app)
     ex = ImageTextPairApp()
     ex.show()
     sys.exit(app.exec_())
