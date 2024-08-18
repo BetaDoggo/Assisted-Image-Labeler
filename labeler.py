@@ -170,8 +170,10 @@ class BatchProcessingWorker(QThread):
             
             if self.main_app.provider_dropdown.currentText() == "Local":
                 result = self.generate_local_caption(current_image)
-            else:  # Fal
+            elif self.main_app.provider_dropdown.currentText() == "Fal":
                 result = self.generate_fal_caption(current_image)
+            else:  # OpenRouter
+                result = self.generate_openrouter_caption(current_image)
             
             self.caption_generated.emit(i, result)
             processed += 1
@@ -207,6 +209,24 @@ class BatchProcessingWorker(QThread):
 
         return self.main_app.fal_describe_image(image_path, prompt, max_tokens, temp, top_p, model, api_key)
 
+    def generate_openrouter_caption(self, image_path):
+        prompt = self.main_app.openrouter_prompt_input.toPlainText()
+        model = self.main_app.openrouter_models_dropdown.currentText()
+        api_key = self.main_app.settings.value("openrouter_api_key", "")
+        max_tokens = self.main_app.openrouter_max_tokens_input.value()
+        temperature = self.main_app.openrouter_temp_slider.value() / 100
+        repetition_penalty = self.main_app.openrouter_rep_penalty_slider.value() / 100
+
+        if self.main_app.openrouter_include_caption_checkbox.isChecked():
+            current_caption = ""
+            txt_path = os.path.splitext(image_path)[0] + '.txt'
+            if os.path.exists(txt_path):
+                with open(txt_path, 'r') as f:
+                    current_caption = f.read().strip()
+            prompt = prompt.replace("{caption}", f'"{current_caption}"')
+
+        return self.main_app.openrouter_describe_image(prompt, model, api_key, max_tokens, temperature, repetition_penalty)
+
 class ImageTextPairApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -235,6 +255,7 @@ class ImageTextPairApp(QWidget):
 
         self.prompt_label.setVisible(show)
         self.prompt_input.setVisible(show)
+        self.fal_include_caption_checkbox.setVisible(show)
         self.max_tokens_label.setVisible(show)
         self.max_tokens_input.setVisible(show)
         self.temp_label.setVisible(show)
@@ -372,6 +393,10 @@ class ImageTextPairApp(QWidget):
             return
         
         prompt = self.openrouter_prompt_input.toPlainText()
+        
+        if self.openrouter_include_caption_checkbox.isChecked():
+            current_caption = self.text_edit.toPlainText()
+            prompt = prompt.replace("{caption}", f'"{current_caption}"')
         model = self.openrouter_models_dropdown.currentText()
         api_key = self.settings.value("openrouter_api_key", "")
         max_tokens = self.openrouter_max_tokens_input.value()
@@ -449,6 +474,10 @@ class ImageTextPairApp(QWidget):
 
         current_image = os.path.join(self.current_directory, self.image_files[self.current_image_index])
         prompt = self.prompt_input.toPlainText()
+        
+        if self.fal_include_caption_checkbox.isChecked():
+            current_caption = self.text_edit.toPlainText()
+            prompt = prompt.replace("{caption}", f'"{current_caption}"')
         max_tokens = self.max_tokens_input.value()
         temp = self.temp_slider.value() / 10
         top_p = self.top_p_slider.value() / 10
@@ -692,6 +721,11 @@ class ImageTextPairApp(QWidget):
         fal_layout.addWidget(self.prompt_label)
         fal_layout.addWidget(self.prompt_input)
 
+        self.fal_include_caption_checkbox = QCheckBox("Replace {caption}")
+        self.fal_include_caption_checkbox.setToolTip("Replace {caption} in the prompt with the current caption text")
+        self.fal_include_caption_checkbox.setChecked(True)
+        fal_layout.addWidget(self.fal_include_caption_checkbox)
+
         self.max_tokens_label = QLabel("Max Tokens:")
         self.max_tokens_input = QSpinBox()
         self.max_tokens_input.setRange(1, 2048)
@@ -863,6 +897,11 @@ class ImageTextPairApp(QWidget):
         openrouter_layout.addWidget(self.openrouter_prompt_label)
         openrouter_layout.addWidget(self.openrouter_prompt_input)
         
+        self.openrouter_include_caption_checkbox = QCheckBox("Replace {caption}")
+        self.openrouter_include_caption_checkbox.setToolTip("Replace {caption} in the prompt with the current caption text")
+        self.openrouter_include_caption_checkbox.setChecked(True)
+        openrouter_layout.addWidget(self.openrouter_include_caption_checkbox)
+
         # Add max_tokens input
         max_tokens_layout = QHBoxLayout()
         max_tokens_label = QLabel("Max Tokens:")
@@ -905,6 +944,10 @@ class ImageTextPairApp(QWidget):
         self.openrouter_generate_button = QPushButton("Generate Caption")
         self.openrouter_generate_button.clicked.connect(self.generate_openrouter_caption)
         openrouter_layout.addWidget(self.openrouter_generate_button)
+
+        self.openrouter_batch_process_button = QPushButton("Batch Processing")
+        self.openrouter_batch_process_button.clicked.connect(self.open_batch_processing)
+        openrouter_layout.addWidget(self.openrouter_batch_process_button)
         
         openrouter_layout.addStretch(1)
         self.stacked_widget.addWidget(openrouter_widget)
