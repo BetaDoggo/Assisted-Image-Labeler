@@ -209,11 +209,18 @@ class ImageTextPairApp(QWidget):
         self.settings = QSettings("GoodCompany", "Labeler")
         self.initUI()
         self.apply_theme()
+        self.setFocusPolicy(Qt.StrongFocus)
     
     def closeEvent(self, event):
         if self.should_autosave():
             self.save_description()
         super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete:
+            self.delete_current_image()
+        else:
+            super().keyPressEvent(event)
 
     def toggle_model_options(self, model):
         llava_and_moondream_models = ["LLavaV15_13B", "LLavaV16_34B", "moondream_2", "moondream_2_docci"]
@@ -469,10 +476,12 @@ class ImageTextPairApp(QWidget):
         self.prev_button = QPushButton('', self)
         self.prev_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowLeft))
         self.prev_button.clicked.connect(self.previous_image)
-        
+        self.prev_button.setToolTip("Previous image")
+
         self.next_button = QPushButton('', self)
         self.next_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowRight))
         self.next_button.clicked.connect(self.next_image)
+        self.next_button.setToolTip("Next image")
 
         # Image display
         self.scroll_area = QScrollArea()
@@ -485,6 +494,7 @@ class ImageTextPairApp(QWidget):
         self.delete_button = QPushButton('Delete', self)
         self.delete_button.setStyleSheet("background-color: red; min-width: 60px; min-height: 30px;")
         self.delete_button.clicked.connect(self.delete_current_image)
+        self.delete_button.setToolTip("Delete current image (Delete key)")
         self.labeled_counter = QLabel("0/0 labeled")
         self.image_counter = QLabel("0/0")
         delete_counter_layout.addWidget(self.delete_button)
@@ -522,8 +532,10 @@ class ImageTextPairApp(QWidget):
         load_button.clicked.connect(self.load_directory)
         save_button = QPushButton('Manual Save', self)
         save_button.clicked.connect(self.save_description)
+        save_button.setToolTip("Save the caption (redundant if autosave is enabled)")
         next_unlabeled_button = QPushButton('Next Unlabeled', self)
         next_unlabeled_button.clicked.connect(self.next_unlabeled_image)
+        next_unlabeled_button.setToolTip("Jump to the next unlabeled image")
         button_layout.addWidget(load_button)
         button_layout.addWidget(save_button)
         button_layout.addWidget(next_unlabeled_button)
@@ -541,6 +553,7 @@ class ImageTextPairApp(QWidget):
         self.show_models_button = QPushButton('Show Models', self)
         self.show_models_button.setCheckable(True)
         self.show_models_button.clicked.connect(self.toggle_models_panel)
+        self.show_models_button.setToolTip("Toggle the Models tab")
         jump_models_layout.addWidget(settings_button)
         jump_models_layout.addWidget(self.jump_input)
         jump_models_layout.addWidget(jump_button)
