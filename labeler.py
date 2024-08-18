@@ -1,5 +1,6 @@
 import os
 import sys
+import requests
 from wd_tagger.tagger import ImageTagger
 import fal_client
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTextEdit, QLabel, QFileDialog, 
@@ -41,10 +42,15 @@ class SettingsDialog(QDialog):
         self.autosave_checkbox.setChecked(self.settings.value("autosave", True, type=bool))
         layout.addRow("Autosave on navigation:", self.autosave_checkbox)
 
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setText(self.settings.value("fal_api_key", ""))
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        layout.addRow("Fal API Key:", self.api_key_input)
+        self.fal_api_key_input = QLineEdit()
+        self.fal_api_key_input.setText(self.settings.value("fal_api_key", ""))
+        self.fal_api_key_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("Fal API Key:", self.fal_api_key_input)
+
+        self.openrouter_api_key_input = QLineEdit()
+        self.openrouter_api_key_input.setText(self.settings.value("openrouter_api_key", ""))
+        self.openrouter_api_key_input.setEchoMode(QLineEdit.Password)
+        layout.addRow("OpenRouter API Key:", self.openrouter_api_key_input)
 
         self.theme_dropdown = QComboBox()
         self.theme_dropdown.addItems(["Dark", "Light", "Lime"])
@@ -57,7 +63,8 @@ class SettingsDialog(QDialog):
 
     def save_settings(self):
         self.settings.setValue("autosave", self.autosave_checkbox.isChecked())
-        self.settings.setValue("fal_api_key", self.api_key_input.text())
+        self.settings.setValue("fal_api_key", self.fal_api_key_input.text())
+        self.settings.setValue("openrouter_api_key", self.openrouter_api_key_input.text())
         self.settings.setValue("theme", self.theme_dropdown.currentText())
         self.accept()
 
@@ -246,10 +253,20 @@ class ImageTextPairApp(QWidget):
             self.local_status_label.setText("Status: Ready")
 
     def on_provider_changed(self, provider):
-            if provider == "Fal":
-                self.stacked_widget.setCurrentIndex(0)
-            else:  # Local
-                self.stacked_widget.setCurrentIndex(1)
+        if provider == "Fal":
+            self.stacked_widget.setCurrentIndex(0)
+        elif provider == "Local":
+            self.stacked_widget.setCurrentIndex(1)
+        else:  # OpenRouter
+            self.stacked_widget.setCurrentIndex(2)
+
+    def update_openrouter_temp_value(self):
+        value = self.openrouter_temp_slider.value() / 100
+        self.openrouter_temp_value.setText(f"{value:.2f}")
+        
+    def update_openrouter_rep_penalty_value(self):
+        value = self.openrouter_rep_penalty_slider.value() / 100
+        self.openrouter_rep_penalty_value.setText(f"{value:.2f}")
 
     def update_repetition_penalty_value(self):
         self.repetition_penalty_value.setText(f"{self.repetition_penalty_slider.value() / 100:.2f}")
@@ -348,6 +365,82 @@ class ImageTextPairApp(QWidget):
                 self.local_generate_button.setEnabled(True)
                 self.prev_button.setEnabled(True)
                 self.next_button.setEnabled(True)
+
+    def generate_openrouter_caption(self):
+        if not self.image_files:
+            QMessageBox.warning(self, "No Image", "Please load an image first.")
+            return
+        
+        prompt = self.openrouter_prompt_input.toPlainText()
+        model = self.openrouter_models_dropdown.currentText()
+        api_key = self.settings.value("openrouter_api_key", "")
+        max_tokens = self.openrouter_max_tokens_input.value()
+        temperature = self.openrouter_temp_slider.value() / 100
+        repetition_penalty = self.openrouter_rep_penalty_slider.value() / 100
+        
+        if not api_key:
+            QMessageBox.warning(self, "Missing API Key", "Please set your OpenRouter API key in the Settings.")
+            return
+        
+        self.openrouter_status_label.setText("Status: Generating...")
+        self.openrouter_generate_button.setEnabled(False)
+        self.prev_button.setEnabled(False)
+        self.next_button.setEnabled(False)
+        QApplication.processEvents()
+        
+        try:
+            output_text = self.openrouter_describe_image(prompt, model, api_key, max_tokens, temperature, repetition_penalty)
+            
+            caption_mode = self.caption_mode_dropdown.currentText()
+            if caption_mode == "Append":
+                current_text = self.text_edit.toPlainText()
+                if current_text:
+                    self.text_edit.setText(f"{current_text}\n\n{output_text}")
+                else:
+                    self.text_edit.setText(output_text)
+            else:  # Replace
+                self.text_edit.setText(output_text)
+            
+            self.openrouter_status_label.setText("Status: Generation Complete")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"An error occurred: {str(e)}")
+            self.openrouter_status_label.setText("Status: Generation Failed")
+        finally:
+            self.openrouter_generate_button.setEnabled(True)
+            self.prev_button.setEnabled(True)
+            self.next_button.setEnabled(True)
+
+    def openrouter_describe_image(self, prompt, model, api_key, max_tokens, temperature, repetition_penalty):
+        models = {
+            "llama-3.1-8B (free)": "meta-llama/llama-3.1-8b-instruct:free",
+            "phi3-mini (free)": "microsoft/phi-3-mini-128k-instruct:free",
+            "phi3-medium (free)": "microsoft/phi-3-medium-128k-instruct:free",
+            "Gemma-2-9B (free)": "google/gemma-2-9b-it:free",
+        }
+        model_id = models.get(model)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": f"https://github.com/BetaDoggo/Assisted-Image-Labeler",
+            "X-Title": f"Assisted-Image-Labeler",
+            "Content-Type": "application/json"
+        }
+       
+        data = {
+            "model": model_id,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                ]}
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "repetition_penalty": repetition_penalty
+        }
+       
+        response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=data)
+        response.raise_for_status()
+       
+        return response.json()['choices'][0]['message']['content']
 
     def generate_fal_caption(self):
         if not self.image_files:
@@ -573,13 +666,13 @@ class ImageTextPairApp(QWidget):
         provider_layout = QHBoxLayout()
         provider_label = QLabel("Provider:")
         self.provider_dropdown = QComboBox()
-        self.provider_dropdown.addItems(["Fal", "Local"])
+        self.provider_dropdown.addItems(["Fal", "Local", "OpenRouter"])
         self.provider_dropdown.currentTextChanged.connect(self.on_provider_changed)
         provider_layout.addWidget(provider_label)
         provider_layout.addWidget(self.provider_dropdown)
         right_layout.addLayout(provider_layout)
 
-        # Stacked widget for Fal and Local options
+        # Stacked widget for Providers
         self.stacked_widget = QStackedWidget()
 
         # Fal layout
@@ -753,6 +846,68 @@ class ImageTextPairApp(QWidget):
     
         self.right_panel.hide()  # Initially hidden
         main_layout.addWidget(self.right_panel, 3)  # Giving less space to the right panel
+
+        # OpenRouter layout
+        openrouter_widget = QWidget()
+        openrouter_layout = QVBoxLayout(openrouter_widget)
+        
+        models_label = QLabel("Models:")
+        self.openrouter_models_dropdown = QComboBox()
+        self.openrouter_models_dropdown.addItems(["llama-3.1 (free)", "Gemma-2-9B (free)", "phi3-mini (free)", "phi3-medium (free)"])
+        openrouter_layout.addWidget(models_label)
+        openrouter_layout.addWidget(self.openrouter_models_dropdown)
+        
+        self.openrouter_prompt_label = QLabel("Prompt:")
+        self.openrouter_prompt_input = QTextEdit()
+        self.openrouter_prompt_input.setPlaceholderText("Enter prompt here...")
+        openrouter_layout.addWidget(self.openrouter_prompt_label)
+        openrouter_layout.addWidget(self.openrouter_prompt_input)
+        
+        # Add max_tokens input
+        max_tokens_layout = QHBoxLayout()
+        max_tokens_label = QLabel("Max Tokens:")
+        self.openrouter_max_tokens_input = QSpinBox()
+        self.openrouter_max_tokens_input.setRange(1, 2048)
+        self.openrouter_max_tokens_input.setValue(256)
+        max_tokens_layout.addWidget(max_tokens_label)
+        max_tokens_layout.addWidget(self.openrouter_max_tokens_input)
+        openrouter_layout.addLayout(max_tokens_layout)
+        
+        # Add temperature slider
+        temp_layout = QHBoxLayout()
+        temp_label = QLabel("Temperature:")
+        self.openrouter_temp_slider = QSlider(Qt.Horizontal)
+        self.openrouter_temp_slider.setRange(0, 200)
+        self.openrouter_temp_slider.setValue(70)
+        self.openrouter_temp_value = QLabel("0.7")
+        temp_layout.addWidget(temp_label)
+        temp_layout.addWidget(self.openrouter_temp_slider)
+        temp_layout.addWidget(self.openrouter_temp_value)
+        openrouter_layout.addLayout(temp_layout)
+        self.openrouter_temp_slider.valueChanged.connect(self.update_openrouter_temp_value)
+        
+        # Add repetition_penalty slider
+        rep_penalty_layout = QHBoxLayout()
+        rep_penalty_label = QLabel("Repetition Penalty:")
+        self.openrouter_rep_penalty_slider = QSlider(Qt.Horizontal)
+        self.openrouter_rep_penalty_slider.setRange(1, 200)
+        self.openrouter_rep_penalty_slider.setValue(100)
+        self.openrouter_rep_penalty_value = QLabel("1.00")
+        rep_penalty_layout.addWidget(rep_penalty_label)
+        rep_penalty_layout.addWidget(self.openrouter_rep_penalty_slider)
+        rep_penalty_layout.addWidget(self.openrouter_rep_penalty_value)
+        openrouter_layout.addLayout(rep_penalty_layout)
+        self.openrouter_rep_penalty_slider.valueChanged.connect(self.update_openrouter_rep_penalty_value)
+        
+        self.openrouter_status_label = QLabel("Status: Ready")
+        openrouter_layout.addWidget(self.openrouter_status_label)
+        
+        self.openrouter_generate_button = QPushButton("Generate Caption")
+        self.openrouter_generate_button.clicked.connect(self.generate_openrouter_caption)
+        openrouter_layout.addWidget(self.openrouter_generate_button)
+        
+        openrouter_layout.addStretch(1)
+        self.stacked_widget.addWidget(openrouter_widget)
 
         self.setLayout(main_layout)
 
