@@ -442,7 +442,7 @@ class ImageTextPairApp(QWidget):
             "phi3-medium (free)": "microsoft/phi-3-medium-128k-instruct:free",
             "Gemma-2-9B (free)": "google/gemma-2-9b-it:free",
         }
-        model_id = models.get(model)
+        model_id = models.get(model, "meta-llama/llama-3.1-8b-instruct:free")
         headers = {
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": f"https://github.com/BetaDoggo/Assisted-Image-Labeler",
@@ -887,7 +887,7 @@ class ImageTextPairApp(QWidget):
         
         models_label = QLabel("Models:")
         self.openrouter_models_dropdown = QComboBox()
-        self.openrouter_models_dropdown.addItems(["llama-3.1 (free)", "Gemma-2-9B (free)", "phi3-mini (free)", "phi3-medium (free)"])
+        self.openrouter_models_dropdown.addItems(["llama-3.1-8B (free)", "Gemma-2-9B (free)", "phi3-mini (free)", "phi3-medium (free)"])
         openrouter_layout.addWidget(models_label)
         openrouter_layout.addWidget(self.openrouter_models_dropdown)
         
