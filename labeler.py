@@ -85,6 +85,27 @@ class BatchProcessingDialog(QDialog):
         self.skip_captioned.stateChanged.connect(self.update_button_text)
         self.layout.addWidget(self.skip_captioned)
         
+        self.range_label = QLabel()
+        self.range_label.setText("Batch range:")
+        self.layout.addWidget(self.range_label)
+
+        # Caption range
+        self.caption_range_min = QSpinBox()
+        self.caption_range_min.setRange(1, len(self.parent().image_files))
+        self.caption_range_min.valueChanged.connect(self.update_button_text)
+        self.to_label = QLabel("to")
+        self.to_label.setFixedWidth(10)
+        self.caption_range_max = QSpinBox()
+        self.caption_range_max.setRange(1, len(self.parent().image_files))
+        self.caption_range_max.setValue(len(self.parent().image_files))
+        self.caption_range_max.valueChanged.connect(self.update_button_text)
+        line_layout = QHBoxLayout()
+        line_layout.setSpacing(5)
+        line_layout.addWidget(self.caption_range_min)
+        line_layout.addWidget(self.to_label)
+        line_layout.addWidget(self.caption_range_max)
+        self.layout.addLayout(line_layout)
+
         # Progress bar and label
         self.progress_label = QLabel("Ready to start")
         self.progress_bar = QProgressBar(self)
@@ -103,14 +124,21 @@ class BatchProcessingDialog(QDialog):
         self.update_button_text()
 
     def update_button_text(self):
+        min_image = self.caption_range_min.value()
+        max_image = self.caption_range_max.value()
         if self.is_processing:
             self.action_button.setText("Cancel")
         else:
-            total_images = len(self.parent().image_files)
+            if max_image < min_image:
+                max_image, min_image = min_image, max_image
+            total_images = max_image - min_image + 1
             if self.skip_captioned.isChecked():
-                uncaptioned_images = sum(1 for img in self.parent().image_files
-                                         if not os.path.exists(os.path.splitext(os.path.join(self.parent().current_directory, img))[0] + '.txt'))
-                self.action_button.setText(f"Caption {uncaptioned_images} Images")
+                uncaptioned_images = 0
+                for i in range(min_image, max_image + 1):
+                    img_file = self.parent().image_files[i-1]
+                    if not os.path.exists(os.path.splitext(os.path.join(self.parent().current_directory, img_file))[0] + '.txt'):
+                        uncaptioned_images += 1
+                    self.action_button.setText(f"Caption {uncaptioned_images} Images")
             else:
                 self.action_button.setText(f"Caption {total_images} Images")
 
@@ -123,11 +151,15 @@ class BatchProcessingDialog(QDialog):
     def start_processing(self):
         self.is_processing = True
         self.update_button_text()
-        self.worker = BatchProcessingWorker(self.parent(), self.skip_captioned.isChecked())
+        self.worker = BatchProcessingWorker(self.parent(), self.skip_captioned.isChecked(), int(self.caption_range_min.value()), int(self.caption_range_max.value()))
         self.worker.progress_updated.connect(self.update_progress)
         self.worker.caption_generated.connect(self.parent().update_caption)
         self.worker.finished.connect(self.on_finished)
         self.worker.start()
+
+    def handle_error(self, error_message):
+        # Display the error message to the user
+        QMessageBox.critical(self, "Error", f"An error occurred: {error_message}")
 
     def stop_processing(self):
         if self.worker:
@@ -150,21 +182,30 @@ class BatchProcessingWorker(QThread):
     caption_generated = pyqtSignal(int, str)
     finished = pyqtSignal()
 
-    def __init__(self, main_app, skip_captioned):
+    def __init__(self, main_app, skip_captioned, min_image, max_image):
         super().__init__()
         self.main_app = main_app
         self.skip_captioned = skip_captioned
+        self.min_image = min_image
+        self.max_image = max_image
 
     def run(self):
-        total_images = len(self.main_app.image_files)
+        if self.max_image < self.min_image:
+            self.max_image, self.min_image = self.min_image, self.max_image # swap max and min if they're reversed
+        total_images = self.max_image - self.min_image + 1
         processed = 0
-        for i, image_file in enumerate(self.main_app.image_files):
+        for i in range(self.min_image, self.max_image + 1):
             if self.isInterruptionRequested():
                 break
-            
+            image_file = self.main_app.image_files[i - 1]
             current_image = os.path.join(self.main_app.current_directory, image_file)
             txt_path = os.path.splitext(current_image)[0] + '.txt'
+            if self.skip_captioned and os.path.exists(txt_path):
+                total_images -= 1 # decrease total for every captioned image  
             
+            image_file = self.main_app.image_files[i - 1]
+            current_image = os.path.join(self.main_app.current_directory, image_file)
+            txt_path = os.path.splitext(current_image)[0] + '.txt'
             if self.skip_captioned and os.path.exists(txt_path):
                 continue
             
@@ -174,8 +215,7 @@ class BatchProcessingWorker(QThread):
                 result = self.generate_fal_caption(current_image)
             else:  # OpenRouter
                 result = self.generate_openrouter_caption(current_image)
-            
-            self.caption_generated.emit(i, result)
+            self.caption_generated.emit(i - 1, result)
             processed += 1
             self.progress_updated.emit(processed, total_images)
         self.finished.emit()
